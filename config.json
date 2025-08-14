@@ -1,0 +1,11 @@
+{
+  "model_name": "mistral",
+  "system_prompt": "You are Vynx, a friendly, concise, motivating assistant.",
+  "tts_voice_id": null,
+  "tts_rate": 180,
+  "tts_volume": 1.0,
+  "mic_device": null,
+  "wake_word": null,
+  "logs_enabled": true,
+  "memory_enabled": false
+}

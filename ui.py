@@ -1,215 +1,126 @@
-import math
-import customtkinter as ctk
 import tkinter as tk
-
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("dark-blue")
-
-
-class VynxVisualizer(ctk.CTkCanvas):
-    def __init__(self, master, size=100, points_count=500, **kwargs):
-        super().__init__(master, width=size, height=size, bg="#000000", highlightthickness=0, **kwargs)
-        self.size = size
-        self.radius = size // 2 - 10
-        self.center = (size // 2, size // 2)
-        self.points_count = points_count
-
-        self.base_points = [
-            (
-                self.center[0] + self.radius * math.cos(2 * math.pi * i / points_count),
-                self.center[1] + self.radius * math.sin(2 * math.pi * i / points_count)
-            )
-            for i in range(points_count)
-        ]
-
-        self.lines = []
-        self.phase = 0
-        self.state = "waiting"
-
-        self.current_amplitude = 0
-        self.target_amplitude = 0
-
-        self.current_phase_speed = 0
-        self.target_phase_speed = 0
-
-        self.max_amplitude = 4
-        self.easing = 0.1
-
-        self.draw_static_circle()
-        self.animate()
-
-    def draw_static_circle(self):
-        self.delete("all")
-        self.lines = []
-        for i in range(self.points_count):
-            p1 = self.base_points[i]
-            p2 = self.base_points[(i + 1) % self.points_count]
-            line = self.create_line(*p1, *p2, fill="#A020F0")
-            self.lines.append(line)
-
-    def update_animation(self):
-        self.current_amplitude += (self.target_amplitude - self.current_amplitude) * self.easing
-        self.current_phase_speed += (self.target_phase_speed - self.current_phase_speed) * self.easing
-
-        self.phase += self.current_phase_speed
-
-        new_points = []
-        for i in range(self.points_count):
-            angle = 2 * math.pi * i / self.points_count + math.pi
-            offset = 0
-
-            if self.state == "thinking":
-                if math.pi <= angle % (2 * math.pi) <= 2 * math.pi:
-                    offset = self.current_amplitude * math.sin(self.phase + i * 0.3)
-            elif self.state == "talking":
-                offset = self.current_amplitude * math.sin(self.phase + i * 0.3)
-
-            new_x = self.center[0] + (self.radius + offset) * math.cos(angle)
-            new_y = self.center[1] + (self.radius + offset) * math.sin(angle)
-            new_points.append((new_x, new_y))
-
-        for i in range(self.points_count):
-            p1 = new_points[i]
-            p2 = new_points[(i + 1) % self.points_count]
-            if i < len(self.lines):
-                self.coords(self.lines[i], *p1, *p2)
-
-    def animate(self):
-        try:
-            self.update_animation()
-        except Exception:
-            pass
-        self.after(50, self.animate)
-
-    def set_state(self, new_state):
-        if new_state not in ("waiting", "thinking", "talking"):
-            raise ValueError(f"Invalid state: {new_state}")
-
-        self.state = new_state
-
-        state_settings = {
-            "waiting": {"amplitude": 0, "phase_speed": 0},
-            "thinking": {"amplitude": self.max_amplitude * 0.6, "phase_speed": 0.1},
-            "talking": {"amplitude": self.max_amplitude, "phase_speed": 0.3},
-        }
-
-        settings = state_settings[new_state]
-        self.target_amplitude = settings["amplitude"]
-        self.target_phase_speed = settings["phase_speed"]
-
+from tkinter import ttk, messagebox
+from settings import Settings
 
 class VynxApp:
-    def __init__(self, send_callback, voice_callback):
+    def __init__(self, on_send, on_toggle, on_settings_saved):
+        self.on_send_cb = on_send
+        self.on_toggle_cb = on_toggle
+        self.on_settings_saved = on_settings_saved
         self.root = tk.Tk()
-        self.send_callback = send_callback
-        self.voice_callback = voice_callback
+        self.root.title("Vynx Lite")
+        self.root.geometry("840x640")
+        self.root.minsize(720, 520)
+        self.style = ttk.Style(self.root)
+        self.style.theme_use("clam")
+        top = ttk.Frame(self.root, padding=8)
+        top.pack(side=tk.TOP, fill=tk.X)
+        self.toggle_btn = ttk.Button(top, text="Listening: ON", command=self.on_toggle_cb)
+        self.toggle_btn.pack(side=tk.LEFT)
+        self.settings_btn = ttk.Button(top, text="Settings", command=self.open_settings)
+        self.settings_btn.pack(side=tk.LEFT, padx=6)
+        self.status_var = tk.StringVar(value="")
+        self.status_lbl = ttk.Label(top, textvariable=self.status_var, foreground="#666")
+        self.status_lbl.pack(side=tk.RIGHT)
+        mid = ttk.Frame(self.root, padding=(8, 0, 8, 8))
+        mid.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.chat = tk.Text(mid, wrap="word", state="disabled")
+        self.chat.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(mid, command=self.chat.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.chat["yscrollcommand"] = sb.set
+        bottom = ttk.Frame(self.root, padding=8)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
+        self.input_var = tk.StringVar()
+        self.input = ttk.Entry(bottom, textvariable=self.input_var)
+        self.input.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.input.bind("<Return>", lambda e: self.send())
+        self.send_btn = ttk.Button(bottom, text="Send", command=self.send)
+        self.send_btn.pack(side=tk.LEFT, padx=6)
+        self.root.after(0, lambda: self.input.focus_set())
+        self._on_close = None
 
-        self.root.title("Vynx")
-        self.root.attributes('-fullscreen', True)
-        self.root.configure(background="#000000")
+    def add_chat_bubble(self, text, role="assistant"):
+        self.chat.configure(state="normal")
+        prefix = "You: " if role == "user" else "Vynx: "
+        self.chat.insert("end", prefix + text + "\n")
+        self.chat.configure(state="disabled")
+        self.chat.see("end")
 
-        self.input_mode = "text"
+    def send(self):
+        text = self.input_var.get()
+        if not text.strip():
+            return
+        self.input_var.set("")
+        self.on_send_cb(text)
 
-        self.chat_display = ctk.CTkTextbox(
-            self.root, wrap="word", font=("Consolas", 14), state="disabled",
-            border_width=1, border_color="#A020F0", fg_color="#0A0A0A", text_color="#C060FF"
-        )
-        self.chat_display.pack(padx=20, pady=(20, 10), fill="both", expand=True)
+    def set_listening_state(self, is_on: bool):
+        self.toggle_btn.configure(text="Listening: ON" if is_on else "Listening: OFF")
 
-        input_frame = ctk.CTkFrame(self.root, fg_color="#000000")
-        input_frame.pack(padx=20, pady=(0, 20), fill="x")
+    def toast(self, msg: str):
+        self.status_var.set(msg)
+        self.root.after(3500, lambda: self.status_var.set(""))
 
-        self.input_field = ctk.CTkTextbox(
-            input_frame, height=45, font=("Consolas", 14),
-            border_width=1, border_color="#A020F0", fg_color="#0A0A0A", text_color="#C060FF"
-        )
-        self.input_field.pack(side="left", fill="both", expand=True, padx=(0, 10))
-        self.input_field.bind("<Return>", self.on_enter)
-        self.input_field.bind("<Shift-Return>", self.newline)
+    def open_settings(self):
+        win = tk.Toplevel(self.root)
+        win.title("Settings")
+        win.geometry("420x360")
+        s = Settings.load()
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text="Model name").grid(row=0, column=0, sticky="w")
+        model_var = tk.StringVar(value=s.model_name)
+        ttk.Entry(frm, textvariable=model_var).grid(row=0, column=1, sticky="ew")
+        ttk.Label(frm, text="System prompt").grid(row=1, column=0, sticky="w")
+        sys_var = tk.StringVar(value=s.system_prompt)
+        ttk.Entry(frm, textvariable=sys_var).grid(row=1, column=1, sticky="ew")
+        ttk.Label(frm, text="Mic device").grid(row=2, column=0, sticky="w")
+        mic_var = tk.StringVar(value=s.mic_device if s.mic_device else "")
+        ttk.Entry(frm, textvariable=mic_var).grid(row=2, column=1, sticky="ew")
+        ttk.Label(frm, text="Wake word").grid(row=3, column=0, sticky="w")
+        wake_var = tk.StringVar(value=s.wake_word if s.wake_word else "")
+        ttk.Entry(frm, textvariable=wake_var).grid(row=3, column=1, sticky="ew")
+        ttk.Label(frm, text="TTS voice id").grid(row=4, column=0, sticky="w")
+        voice_var = tk.StringVar(value=s.tts_voice_id if s.tts_voice_id else "")
+        ttk.Entry(frm, textvariable=voice_var).grid(row=4, column=1, sticky="ew")
+        ttk.Label(frm, text="TTS rate").grid(row=5, column=0, sticky="w")
+        rate_var = tk.IntVar(value=s.tts_rate)
+        ttk.Entry(frm, textvariable=rate_var).grid(row=5, column=1, sticky="ew")
+        ttk.Label(frm, text="TTS volume").grid(row=6, column=0, sticky="w")
+        vol_var = tk.DoubleVar(value=s.tts_volume)
+        ttk.Entry(frm, textvariable=vol_var).grid(row=6, column=1, sticky="ew")
+        mem_var = tk.BooleanVar(value=s.memory_enabled)
+        ttk.Checkbutton(frm, text="Enable memory", variable=mem_var).grid(row=7, column=0, columnspan=2, sticky="w")
+        log_var = tk.BooleanVar(value=s.logs_enabled)
+        ttk.Checkbutton(frm, text="Enable logs", variable=log_var).grid(row=8, column=0, columnspan=2, sticky="w")
+        btns = ttk.Frame(frm)
+        btns.grid(row=9, column=0, columnspan=2, pady=8, sticky="e")
+        def save():
+            ns = Settings(
+                model_name=model_var.get().strip() or "mistral",
+                system_prompt=sys_var.get(),
+                tts_voice_id=voice_var.get().strip() or None,
+                tts_rate=int(rate_var.get()),
+                tts_volume=float(vol_var.get()),
+                mic_device=mic_var.get().strip() or None,
+                wake_word=wake_var.get().strip() or None,
+                logs_enabled=bool(log_var.get()),
+                memory_enabled=bool(mem_var.get())
+            )
+            self.on_settings_saved(ns)
+            win.destroy()
+        ttk.Button(btns, text="Save", command=save).pack(side=tk.RIGHT)
+        frm.columnconfigure(1, weight=1)
 
-        self.visualizer = VynxVisualizer(input_frame, size=80)
-        self.visualizer.pack(side="right", padx=(0, 10))
+    def on_close(self, cb):
+        self._on_close = cb
+        self.root.protocol("WM_DELETE_WINDOW", lambda: self._on_close())
 
-        self.mic_button = ctk.CTkButton(
-            input_frame,
-            text="🎤",
-            width=45,
-            height=45,
-            command=self.toggle_input_mode,
-            fg_color="#222222",
-            hover_color="#444444",
-            text_color="white",
-            border_width=1,
-            border_color="#A020F0",
-            font=("Consolas", 20)
-        )
-        self.mic_button.pack(side="right", padx=(0, 10))
+    def close(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
-        self.send_button = ctk.CTkButton(
-            input_frame,
-            text="Send",
-            width=100,
-            height=45,
-            command=self.send_callback,
-            fg_color="#A020F0",
-            hover_color="#C060FF",
-            text_color="black",
-            border_width=2,
-            border_color="#8A2BE2",
-        )
-        self.send_button.pack(side="right")
-
-    def toggle_input_mode(self):
-        if self.input_mode == "text":
-            self.input_mode = "voice"
-            self.mic_button.configure(fg_color="#A020F0")
-            self.voice_callback()
-        else:
-            self.input_mode = "text"
-            self.mic_button.configure(fg_color="#222222")
-
-    def set_mode(self, mode):
-        self.visualizer.set_state(mode)
-
-    def get_user_input(self):
-        return self.input_field.get("1.0", "end").strip()
-
-    def clear_input(self):
-        self.input_field.delete("1.0", "end")
-
-    def newline(self, event=None):
-        self.input_field.insert("insert", "\n")
-        return "break"
-
-    def on_enter(self, event=None):
-        if self.input_mode == "text":
-            self.send_callback()
-        else:
-            self.voice_callback()
-        return "break"
-
-    def append_chat(self, sender, message):
-        self.chat_display.configure(state="normal")
-        self.chat_display.insert("end", f"{sender}: {message}\n\n")
-        self.chat_display.configure(state="disabled")
-        self.chat_display.see("end")
-
-    def replace_last_response(self, sender, new_message):
-        self.chat_display.configure(state="normal")
-        content = self.chat_display.get("1.0", "end")
-        lines = content.strip().split("\n")
-
-        for i in range(len(lines) - 1, -1, -1):
-            if lines[i].startswith(f"{sender}:"):
-                lines[i] = f"{sender}: {new_message}"
-                break
-        else:
-            lines.append(f"{sender}: {new_message}")
-
-        self.chat_display.delete("1.0", "end")
-        self.chat_display.insert("1.0", "\n".join(lines) + "\n\n")
-        self.chat_display.configure(state="disabled")
-        self.chat_display.see("end")
-
-    def mainloop(self):
+    def run(self):
         self.root.mainloop()

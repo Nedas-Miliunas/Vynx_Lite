@@ -1,78 +1,63 @@
-import pyttsx3
-import re
 import threading
+import queue
 import time
+import pyttsx3
 
-# Initialize a single engine instance and a lock — pyttsx3 is not always thread-safe if you init multiple times.
-_engine = None
-_engine_lock = threading.Lock()
+class TTS:
+    def __init__(self):
+        self._engine = pyttsx3.init()
+        self._queue = queue.Queue()
+        self._lock = threading.Lock()
+        self._worker = threading.Thread(target=self._loop, daemon=True)
+        self._stop_current = threading.Event()
+        self._shutdown = threading.Event()
+        self._worker.start()
 
+    def set_voice(self, voice_id=None, rate=None, volume=None):
+        if voice_id is not None:
+            self._engine.setProperty('voice', voice_id)
+        if rate is not None:
+            self._engine.setProperty('rate', int(rate))
+        if volume is not None:
+            self._engine.setProperty('volume', float(volume))
 
-def _init_engine():
-    global _engine
-    if _engine is None:
-        try:
-            _engine = pyttsx3.init()
-        except Exception as e:
-            _engine = None
-
-
-def remove_emojis(text):
-    emoji_pattern = re.compile("[" 
-        u"\U0001F600-\U0001F64F"
-        u"\U0001F300-\U0001F5FF"
-        u"\U0001F680-\U0001F6FF"
-        u"\U0001F1E0-\U0001F1FF"
-        u"\U00002702-\U000027B0"
-        u"\U000024C2-\U0001F251"
-        "]+", flags=re.UNICODE)
-    return emoji_pattern.sub(r'', text)
-
-
-def speak(text: str, on_start=None, on_end=None):
-    """Speak text on a background thread. Uses a single engine instance and a lock.
-    on_start and on_end are optional callbacks executed on TTS start/end."""
-    def run():
-        if on_start:
+    def speak(self, text: str):
+        with self._lock:
+            self._stop_current.set()
             try:
-                on_start()
+                self._engine.stop()
             except Exception:
                 pass
-
-        cleaned_text = remove_emojis(text)
-
-        _init_engine()
-
-        if _engine is None:
-            print("[TTS Error] engine not available.")
-            if on_end:
+            while not self._queue.empty():
                 try:
-                    on_end()
-                except Exception:
-                    pass
-            return
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._stop_current.clear()
+            self._queue.put(text)
 
-        try:
-            with _engine_lock:
-                voices = _engine.getProperty('voices')
-                if len(voices) > 2:
-                    _engine.setProperty('voice', voices[2].id)
-                elif len(voices) > 0:
-                    _engine.setProperty('voice', voices[0].id)
-
-                _engine.setProperty('rate', 175)
-                _engine.setProperty('volume', 1.0)
-
-                _engine.say(cleaned_text)
-                _engine.runAndWait()
-                time.sleep(0.05)
-        except Exception as e:
-            print(f"[TTS Error] {e}")
-
-        if on_end:
+    def stop(self):
+        with self._lock:
+            self._stop_current.set()
             try:
-                on_end()
+                self._engine.stop()
             except Exception:
                 pass
 
-    threading.Thread(target=run, daemon=True).start()
+    def shutdown(self):
+        self._shutdown.set()
+        self.stop()
+
+    def _loop(self):
+        while not self._shutdown.is_set():
+            try:
+                text = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if self._stop_current.is_set():
+                continue
+            try:
+                self._engine.say(text)
+                self._engine.runAndWait()
+            except Exception:
+                time.sleep(0.05)
